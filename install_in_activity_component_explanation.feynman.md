@@ -363,6 +363,212 @@ Hilt 在 Dagger 的基础上添加了几个关键特性：
 - 为每个 Android 组件类型生成不同的管理器
 - 这些管理器负责在适当的时间创建和释放组件
 
+### Activity 运行时注入依赖项的过程
+
+当我们在 Activity 中使用 Hilt 依赖注入时，整个过程涉及编译时代码生成和运行时依赖注入。下面我们来详细了解一个 Activity（如 MainActivity）是如何在运行时获取 `@InstallIn(ActivityComponent::class)` 标记的模块中的依赖项的。
+
+#### Activity 注入的关键步骤
+
+1. **标记 Activity**：首先，我们需要用 `@AndroidEntryPoint` 注解标记 Activity
+2. **定义需要注入的字段**：在 Activity 中使用 `@Inject` 注解标记需要被注入的字段
+3. **运行时注入**：当 Activity 创建时，Hilt 自动注入这些字段
+
+#### 示例代码
+
+首先，我们有一个用户仓库模块，它安装在 ActivityComponent 中：
+
+```kotlin
+// 定义一个接口和实现
+interface UserRepository {
+    fun getUser(id: String): User
+}
+
+class UserRepositoryImpl @Inject constructor(
+    private val userApi: UserApi
+) : UserRepository {
+    override fun getUser(id: String): User = userApi.fetchUser(id)
+}
+
+// 声明模块
+@Module
+@InstallIn(ActivityComponent::class)
+abstract class UserRepositoryModule {
+    @Binds
+    abstract fun bindUserRepository(
+        userRepositoryImpl: UserRepositoryImpl
+    ): UserRepository
+}
+```
+
+然后，我们创建一个使用该依赖的 Activity：
+
+```kotlin
+@AndroidEntryPoint
+class MainActivity : AppCompatActivity() {
+    // 使用 @Inject 注解标记需要注入的字段
+    @Inject
+    lateinit var userRepository: UserRepository
+    
+    override fun onCreate(savedInstanceState: Bundle?) {
+        // 在 super.onCreate() 调用之前，字段还没有被注入
+        super.onCreate(savedInstanceState)
+        setContentView(R.layout.activity_main)
+        
+        // 在这里可以安全地使用注入的依赖
+        val user = userRepository.getUser("123")
+        updateUI(user)
+    }
+    
+    private fun updateUI(user: User) {
+        // 更新 UI 显示用户信息
+    }
+}
+```
+
+#### 幕后流程详解
+
+当你使用 `@AndroidEntryPoint` 标记 MainActivity 时，Hilt 会生成一个名为 `Hilt_MainActivity` 的基类。实际的代码流程如下：
+
+1. **生成基类**：在编译时，Hilt 为 MainActivity 生成一个基类 `Hilt_MainActivity`
+
+```java
+// 简化的生成代码
+public abstract class Hilt_MainActivity extends AppCompatActivity
+        implements GeneratedComponentManager<ActivityComponent> {
+    
+    private volatile ActivityComponentManager componentManager;
+    private final Object componentManagerLock = new Object();
+    
+    @Override
+    protected void onCreate(Bundle savedInstanceState) {
+        // 在调用 super.onCreate() 之前初始化 componentManager
+        inject();
+        super.onCreate(savedInstanceState);
+    }
+    
+    private void inject() {
+        if (componentManager == null) {
+            synchronized (componentManagerLock) {
+                if (componentManager == null) {
+                    componentManager = new ActivityComponentManager(this);
+                }
+            }
+        }
+        // 这里调用生成的注入器来注入字段
+        ((MainActivity_GeneratedInjector) generatedComponent())
+            .injectMainActivity((MainActivity) this);
+    }
+    
+    @Override
+    public ActivityComponent generatedComponent() {
+        return componentManager.generatedComponent();
+    }
+}
+```
+
+2. **生成注入器接口**：Hilt 还会生成一个接口，用于注入特定的 Activity
+
+```java
+// 简化的生成代码
+@EntryPoint
+@InstallIn(ActivityComponent.class)
+public interface MainActivity_GeneratedInjector {
+    void injectMainActivity(MainActivity instance);
+}
+```
+
+3. **生成成员注入器**：Hilt 生成一个类，负责实际的字段注入
+
+```java
+// 简化的生成代码
+public final class MainActivity_MembersInjector implements MembersInjector<MainActivity> {
+    private final Provider<UserRepository> userRepositoryProvider;
+    
+    @Inject
+    public MainActivity_MembersInjector(Provider<UserRepository> userRepositoryProvider) {
+        this.userRepositoryProvider = userRepositoryProvider;
+    }
+    
+    @Override
+    public void injectMembers(MainActivity instance) {
+        instance.userRepository = userRepositoryProvider.get();
+    }
+}
+```
+
+4. **运行时注入流程**：
+
+   - 当 MainActivity 被创建时，首先构造 `Hilt_MainActivity`
+   - 在 `onCreate()` 中，`inject()` 方法被调用
+   - 初始化 `ActivityComponentManager`，它负责管理 ActivityComponent 的生命周期
+   - 通过组件层次结构（Application → ActivityRetainedComponent → ActivityComponent）获取依赖
+   - 调用 `MainActivity_GeneratedInjector.injectMainActivity()`，注入所有带 `@Inject` 的字段
+   - 然后调用 `super.onCreate()`，此时所有依赖已经被注入
+
+#### 实际代码分析
+
+如果我们查看 `ActivityComponentManager` 的实现，可以看到它是如何创建 ActivityComponent 的：
+
+```java
+public class ActivityComponentManager implements GeneratedComponentManager<Object> {
+    protected Object createComponent() {
+        // 检查 Application 是否支持 Hilt
+        if (!(activity.getApplication() instanceof GeneratedComponentManager)) {
+            throw new IllegalStateException(
+                "Hilt Activity must be attached to an @HiltAndroidApp Application.");
+        }
+        
+        // 从 ActivityRetainedComponent 获取 ActivityComponentBuilder
+        return EntryPoints.get(
+            activityRetainedComponentManager, ActivityComponentBuilderEntryPoint.class)
+            .activityComponentBuilder()
+            // 传入 Activity 实例
+            .activity(activity)
+            .build();
+    }
+}
+```
+
+整个依赖注入过程是自动的，无需手动调用。这就是 Hilt 的魅力所在：它为你处理了所有依赖注入的复杂性，让你可以专注于业务逻辑。
+
+#### 图解注入流程
+
+```
+1. 启动 MainActivity
+   │
+   ▼
+2. 创建 Hilt_MainActivity（生成的基类）
+   │
+   ▼
+3. onCreate() 方法调用 inject()
+   │
+   ▼
+4. 创建 ActivityComponentManager
+   │
+   ▼
+5. 通过组件层次获取依赖
+   │   ┌─────────────────────────────┐
+   │   │ Application                 │
+   │   │   └── SingletonComponent    │
+   │   │       └── ActivityRetained  │
+   │   │           └── Activity      │──────┐
+   │   └─────────────────────────────┘      │
+   ▼                                         │
+6. 获取 UserRepository 实例 ◄────────────────┘
+   │
+   ▼
+7. 注入 MainActivity.userRepository 字段
+   │
+   ▼
+8. 调用原始 onCreate() 完成初始化
+```
+
+#### 注入时机
+
+一个关键点是 Activity 中依赖的注入时机：它发生在 `super.onCreate()` 被调用之前。这就是为什么在 `onCreate()` 方法中可以立即使用注入的依赖项。但这也意味着，你不能在 Activity 的构造函数中使用这些依赖项，因为它们还没有被注入。
+
+通过这种方式，Hilt 确保了依赖项在 Activity 的整个生命周期中可用，并在 Activity 销毁时正确地释放。
+
 ## 评估标准
 
 - **简单性**：我们用简单的类比和故事解释了复杂的实现
@@ -372,4 +578,3 @@ Hilt 在 Dagger 的基础上添加了几个关键特性：
 - **连贯性**：我们构建了完整的执行路径，从编译时处理到运行时组件创建
 - **实用性**：我们解释了不同组件选择的实际影响和常见错误
 - **知识深度**：我们探讨了底层机制，包括注解处理、代码生成和组件管理
-</rewritten_file>
