@@ -740,10 +740,43 @@ class MainActivity : AppCompatActivity() {
    }
    ```
 
+### MainActivity 继承关系的转换时机
+
+一个常见的误解是 MainActivity "运行时"才继承 Hilt_MainActivity。事实上，这种继承关系的转换发生在**编译期**：
+
+1. **原始代码**：开发者编写的是普通的 MainActivity，使用 `@AndroidEntryPoint` 注解标记：
+   ```kotlin
+   @AndroidEntryPoint
+   class MainActivity : AppCompatActivity() {
+       @Inject lateinit var navigator: AppNavigator
+       // ...
+   }
+   ```
+
+2. **编译期转换**：当编译器处理这段代码时，Hilt 的注解处理器会：
+   - 生成 Hilt_MainActivity 基类
+   - **修改 MainActivity 的继承关系**，使其继承自 Hilt_MainActivity 而非直接继承 AppCompatActivity
+   - 这一转换在生成的 Java 字节码中完成，而非源代码层面
+
+3. **字节码转换**：实际生成的字节码相当于：
+   ```kotlin
+   // 这不是实际源代码，而是字节码层面的转换结果
+   class MainActivity : Hilt_MainActivity() {
+       @Inject lateinit var navigator: AppNavigator
+       // ...
+   }
+   ```
+
+4. **验证方法**：你可以通过以下方式验证这一转换：
+   - 在运行时检查 MainActivity 的父类：`MainActivity.class.superclass.name` 将显示 `Hilt_MainActivity`
+   - 在编译后的 DEX 文件中查看 MainActivity 的定义
+
+这种在编译期修改类继承关系的技术称为"父类替换"（superclass replacement）或"编译时继承注入"，是 Hilt 实现依赖注入的核心机制之一。它使得开发者可以编写普通的 Android 组件代码，而由 Hilt 在编译期注入所需的依赖注入基础设施。
+
 #### 运行时发生了什么？
 
 1. **启动 MainActivity**：
-   当系统创建 MainActivity 实例时，实际上创建的是 `Hilt_MainActivity` 的子类。
+   当系统创建 MainActivity 实例时，由于编译期的继承关系转换，实际实例化的类已经继承了 Hilt_MainActivity。
 
 2. **Hilt_MainActivity.onCreate() 被调用**：
    在 `super.onCreate()` 之前，Hilt 会执行注入逻辑：
@@ -764,14 +797,8 @@ class MainActivity : AppCompatActivity() {
        
        private void inject() {
            if (componentManager == null) {
-               synchronized (this) {
-                   if (componentManager == null) {
-                       componentManager = new ActivityComponentManager(this);
-                   }
-               }
+               componentManager = new ActivityComponentManager(this);
            }
-           
-           // 获取组件并执行注入
            ((MainActivity_GeneratedInjector) generatedComponent())
                .injectMainActivity((MainActivity) this);
        }
