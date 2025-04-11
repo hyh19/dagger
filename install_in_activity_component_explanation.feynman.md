@@ -1,11 +1,4 @@
----
-description: 费曼技巧讲解 Hilt 依赖注入库底层实现原理
-globs: 
-alwaysApply: false
----
-# 费曼技巧讲解 Hilt 依赖注入库底层实现原理
-
-## `@InstallIn(ActivityComponent::class)` 的底层实现原理
+# 费曼技巧讲解 `@InstallIn(ActivityComponent::class)` 的底层实现原理
 
 ### 极简工作机制描述
 
@@ -26,10 +19,12 @@ alwaysApply: false
 #### 输入与输出
 
 **输入**：
+
 - 被 `@Module` 和 `@InstallIn(ActivityComponent::class)` 注解标记的类
 - 模块中定义的提供依赖的方法（如 `@Provides`、`@Binds` 等标记的方法）
 
 **输出**：
+
 - 在编译时生成的 Dagger 组件代码，特别是 Activity 级别的组件
 - 这些组件包含从模块中收集到的所有依赖提供方法
 - 自动将这些依赖注入到需要它们的 Activity 中
@@ -176,6 +171,7 @@ public interface ActivityComponent {}
 思考练习：如果我们把 `@InstallIn(ActivityComponent::class)` 改为 `@InstallIn(FragmentComponent::class)`，会发生什么？
 
 **答案**：
+
 - 依赖将只能在 Fragment 中被注入，而不能在 Activity 中使用
 - 依赖的生命周期会缩短，随 Fragment 的创建和销毁而变化
 - 如果 Activity 尝试注入这个依赖，编译将失败
@@ -189,6 +185,7 @@ public interface ActivityComponent {}
 让我们看看一个简单的模块是如何被转换为最终代码的：
 
 **原始代码**：
+
 ```kotlin
 // UserModule.kt
 @Module
@@ -202,6 +199,7 @@ object UserModule {
 ```
 
 **转换步骤 1**：生成 AggregatedDeps 类
+
 ```java
 // hilt_aggregated_deps/UserModuleModuleModuleDeps.java
 package hilt_aggregated_deps;
@@ -216,6 +214,7 @@ public class UserModuleModuleDeps {}
 ```
 
 **转换步骤 2**：如果模块是包私有的，生成公共包装
+
 ```java
 // 如果 UserModule 是包私有的
 @Module(includes = UserModule.class)
@@ -224,6 +223,7 @@ public final class HiltWrapper_UserModule {}
 ```
 
 **转换步骤 3**：将模块添加到生成的 ActivityComponent 实现中
+
 ```java
 // 简化的组件代码
 final class DaggerHiltApplication_HiltComponents_SingletonC {
@@ -245,6 +245,7 @@ final class DaggerHiltApplication_HiltComponents_SingletonC {
 ```
 
 **转换步骤 4**：生成注入器代码
+
 ```java
 // 注入 Activity 的代码
 public final class MainActivity_MembersInjector implements MembersInjector<MainActivity> {
@@ -345,16 +346,19 @@ Hilt 在 Dagger 的基础上添加了几个关键特性：
 #### Hilt 特色功能实现
 
 **ViewModelInject** 的实现机制：
+
 - 使用 `@ViewModelInject` 标记的构造函数会被 Hilt 处理
 - Hilt 生成工厂类，与 AndroidX ViewModel 框架集成
 - 这些工厂通过 `ViewModelComponent` 获取依赖
 
 **预定义组件** 的实现：
+
 - 每个组件（如 ActivityComponent）都被 `@DefineComponent` 标记
 - 它们形成层次结构，反映 Android 组件的包含关系
 - 每个组件都有对应的生命周期管理器（如 ActivityComponentManager）
 
 **与 Android 生命周期集成**：
+
 - Hilt 使用 AndroidX 的生命周期事件来管理组件
 - 为每个 Android 组件类型生成不同的管理器
 - 这些管理器负责在适当的时间创建和释放组件
@@ -368,4 +372,4 @@ Hilt 在 Dagger 的基础上添加了几个关键特性：
 - **连贯性**：我们构建了完整的执行路径，从编译时处理到运行时组件创建
 - **实用性**：我们解释了不同组件选择的实际影响和常见错误
 - **知识深度**：我们探讨了底层机制，包括注解处理、代码生成和组件管理
-</rewritten_file> 
+</rewritten_file>
