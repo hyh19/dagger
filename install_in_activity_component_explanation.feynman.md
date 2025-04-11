@@ -578,3 +578,477 @@ public class ActivityComponentManager implements GeneratedComponentManager<Objec
 - **连贯性**：我们构建了完整的执行路径，从编译时处理到运行时组件创建
 - **实用性**：我们解释了不同组件选择的实际影响和常见错误
 - **知识深度**：我们探讨了底层机制，包括注解处理、代码生成和组件管理
+
+## 深入讲解实际案例：MainActivity 中的导航器注入
+
+让我们通过一个具体例子来理解 `@InstallIn(ActivityComponent::class)` 的底层原理 - MainActivity 中 `@Inject lateinit var navigator: AppNavigator` 的完整注入流程。
+
+### 为什么需要这样注入？
+
+在 Android 应用中，不同的组件（如应用本身、Activity、Fragment 等）有不同的生命周期。当我们使用依赖注入时，我们需要明确地告诉系统"这个依赖应该在哪个生命周期范围内可用"。这就是 `@InstallIn` 注解的主要目的。
+
+对于 MainActivity 中的 navigator 属性：
+1. 我们希望每个 Activity 有自己的 AppNavigator 实例
+2. 这个 navigator 需要访问 Activity 实例来执行导航操作
+3. 当 Activity 销毁时，相关资源应该被释放
+
+### 相关代码分析
+
+首先，让我们看看涉及的关键代码：
+
+**1. NavigationModule 声明：**
+```kotlin
+@InstallIn(ActivityComponent::class)
+@Module
+abstract class NavigationModule {
+    @Binds
+    abstract fun bindNavigator(impl: AppNavigatorImpl): AppNavigator
+}
+```
+
+**2. AppNavigatorImpl 实现：**
+```kotlin
+class AppNavigatorImpl @Inject constructor(private val activity: FragmentActivity) : AppNavigator {
+    override fun navigateTo(screen: Screens) {
+        val fragment = when (screen) {
+            Screens.BUTTONS -> ButtonsFragment()
+            Screens.LOGS -> LogsFragment()
+        }
+        
+        activity.supportFragmentManager.beginTransaction()
+            .replace(R.id.main_container, fragment)
+            .addToBackStack(fragment::class.java.canonicalName)
+            .commit()
+    }
+}
+```
+
+**3. MainActivity 中的注入点：**
+```kotlin
+@AndroidEntryPoint
+class MainActivity : AppCompatActivity() {
+    @Inject lateinit var navigator: AppNavigator
+    
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        setContentView(R.layout.activity_main)
+        
+        if (savedInstanceState == null) {
+            navigator.navigateTo(Screens.BUTTONS)
+        }
+    }
+}
+```
+
+### 完整注入流程解析
+
+#### 编译期发生了什么？
+
+1. **注解处理器启动**：
+   当编译器处理代码时，Hilt 的注解处理器会扫描所有源文件，寻找 Hilt 相关注解。
+
+2. **处理 NavigationModule**：
+   - 发现 `@InstallIn(ActivityComponent::class)` 注解
+   - 记录这个模块需要被安装到 ActivityComponent 中
+   - 检查模块内的方法（这里是 `bindNavigator`）
+
+3. **生成元数据类**：
+   ```java
+   // 在 hilt_aggregated_deps 包中生成
+   @AggregatedDeps(
+       components = "dagger.hilt.android.components.ActivityComponent",
+       modules = "com.example.android.hilt.di.NavigationModule"
+   )
+   class HiltAggregatedDeps_NavigationModuleModuleDeps {}
+   ```
+
+4. **处理 MainActivity**：
+   - 发现 `@AndroidEntryPoint` 注解
+   - 生成 `Hilt_MainActivity` 基类
+   - 创建 MainActivity 的注入器接口
+
+5. **生成 MainActivity 注入器接口**：
+   ```java
+   @EntryPoint
+   @InstallIn(ActivityComponent.class)
+   public interface MainActivity_GeneratedInjector {
+       void injectMainActivity(MainActivity instance);
+   }
+   ```
+
+6. **生成 MainActivity 成员注入器**：
+   ```java
+   public final class MainActivity_MembersInjector 
+           implements MembersInjector<MainActivity> {
+       private final Provider<AppNavigator> navigatorProvider;
+       
+       @Inject
+       public MainActivity_MembersInjector(
+           Provider<AppNavigator> navigatorProvider) {
+           this.navigatorProvider = navigatorProvider;
+       }
+       
+       @Override
+       public void injectMembers(MainActivity instance) {
+           instance.navigator = navigatorProvider.get();
+       }
+   }
+   ```
+
+7. **生成 ActivityComponent 实现**：
+   Hilt 会生成 ActivityComponent 的实现类，这个类会包含所有被 `@InstallIn(ActivityComponent::class)` 标记的模块。
+
+   ```java
+   // 简化的生成代码
+   final class DaggerHiltComponents_SingletonC {
+       // ... 其他代码 ...
+       
+       final class ActivityCImpl extends ActivityC {
+           private final NavigationModule navigationModule;
+           private Provider<FragmentActivity> activityProvider;
+           private Provider<AppNavigatorImpl> appNavigatorImplProvider;
+           private Provider<AppNavigator> appNavigatorProvider;
+           
+           ActivityCImpl(
+                   ActivityRetainedCImpl activityRetainedCImpl,
+                   FragmentActivity activity) {
+               this.navigationModule = new NavigationModule();
+               this.activityProvider = InstanceFactory.create(activity);
+               
+               // 注意这里：AppNavigatorImpl 需要 Activity 作为构造参数
+               this.appNavigatorImplProvider = 
+                   AppNavigatorImpl_Factory.create(activityProvider);
+               
+               // 这是 NavigationModule.bindNavigator() 的结果
+               this.appNavigatorProvider = 
+                   DoubleCheck.provider(
+                       NavigationModule_BindNavigatorFactory.create(
+                           navigationModule, appNavigatorImplProvider));
+           }
+           
+           @Override
+           public void injectMainActivity(MainActivity instance) {
+               MainActivity_MembersInjector.injectNavigator(
+                   instance, getAppNavigator());
+           }
+           
+           @Override
+           public AppNavigator getAppNavigator() {
+               return appNavigatorProvider.get();
+           }
+       }
+   }
+   ```
+
+#### 运行时发生了什么？
+
+1. **启动 MainActivity**：
+   当系统创建 MainActivity 实例时，实际上创建的是 `Hilt_MainActivity` 的子类。
+
+2. **Hilt_MainActivity.onCreate() 被调用**：
+   在 `super.onCreate()` 之前，Hilt 会执行注入逻辑：
+
+   ```java
+   // 简化的 Hilt_MainActivity 代码
+   public abstract class Hilt_MainActivity extends AppCompatActivity
+           implements GeneratedComponentManager<ActivityComponent> {
+       
+       private volatile ActivityComponentManager componentManager;
+       
+       @Override
+       protected void onCreate(Bundle savedInstanceState) {
+           // 注意：inject() 在 super.onCreate() 之前调用
+           inject();
+           super.onCreate(savedInstanceState);
+       }
+       
+       private void inject() {
+           if (componentManager == null) {
+               synchronized (this) {
+                   if (componentManager == null) {
+                       componentManager = new ActivityComponentManager(this);
+                   }
+               }
+           }
+           
+           // 获取组件并执行注入
+           ((MainActivity_GeneratedInjector) generatedComponent())
+               .injectMainActivity((MainActivity) this);
+       }
+       
+       @Override
+       public ActivityComponent generatedComponent() {
+           return componentManager.generatedComponent();
+       }
+   }
+   ```
+
+3. **ActivityComponentManager 创建 ActivityComponent**：
+   ```java
+   public class ActivityComponentManager implements GeneratedComponentManager<ActivityComponent> {
+       private ActivityComponent component;
+       private final Object componentLock = new Object();
+       private final FragmentActivity activity;
+       
+       public ActivityComponentManager(FragmentActivity activity) {
+           this.activity = activity;
+       }
+       
+       @Override
+       public ActivityComponent generatedComponent() {
+           if (component == null) {
+               synchronized (componentLock) {
+                   if (component == null) {
+                       component = createComponent();
+                   }
+               }
+           }
+           return component;
+       }
+       
+       private ActivityComponent createComponent() {
+           // 获取应用级别的组件
+           Object applicationComponent = ((GeneratedComponentManager) 
+               activity.getApplication()).generatedComponent();
+               
+           // 通过应用组件获取 ActivityComponent.Builder
+           return ((ActivityComponent.Builder) EntryPoints.get(
+               applicationComponent, ActivityComponentBuilderHolder.class)
+               .activityComponentBuilder())
+               .activity(activity)  // 提供 Activity 实例
+               .build();
+       }
+   }
+   ```
+
+4. **依赖实例化过程**：
+   1. ActivityComponent 被创建，收集了所有 `@InstallIn(ActivityComponent::class)` 的模块
+   2. 系统需要提供 AppNavigator 实例时：
+      - 首先，查看 ActivityComponent 中是否有 AppNavigator 的提供者
+      - 找到 NavigationModule.bindNavigator 方法
+      - 需要 AppNavigatorImpl 实例，而 AppNavigatorImpl 需要 FragmentActivity
+      - ActivityComponent 已经有 activity 实例（构建时提供）
+      - 创建 AppNavigatorImpl 实例，传入 activity
+      - 通过 NavigationModule.bindNavigator 映射为 AppNavigator
+
+5. **注入 MainActivity.navigator 字段**：
+   - 调用 MainActivity_MembersInjector.injectMembers(mainActivity)
+   - 设置 mainActivity.navigator = navigatorProvider.get()
+   - 此时 navigatorProvider.get() 返回上一步创建的 AppNavigator 实例
+
+6. **继续执行 MainActivity.onCreate()**：
+   - 注入完成后，执行原始的 onCreate 方法
+   - 此时 navigator 字段已经初始化，可以安全使用
+
+### `@InstallIn(ActivityComponent::class)` 的核心作用
+
+在整个流程中，`@InstallIn(ActivityComponent::class)` 起了几个关键作用：
+
+1. **生命周期绑定**：
+   - 确保 AppNavigator 实例与 Activity 生命周期同步
+   - 当 Activity 销毁时，相关依赖也会被释放
+
+2. **依赖可见性控制**：
+   - AppNavigator 只在 Activity 级别可见
+   - 比如，Fragment 可以注入它（因为 FragmentComponent 是 ActivityComponent 的子组件）
+   - 但 Application 级别的组件无法访问它
+
+3. **实例共享范围**：
+   - 同一个 Activity 中的所有依赖注入点共享同一个 AppNavigator 实例
+   - 不同 Activity 拥有不同的 AppNavigator 实例
+
+4. **自动注入 Activity 上下文**：
+   - 由于 AppNavigatorImpl 需要 FragmentActivity 参数
+   - ActivityComponent 自动提供当前 Activity 实例
+   - 这正是为什么 navigator 能够操作当前 Activity 的 Fragment
+
+### 类比：餐厅配送系统
+
+想象一个大型餐厅的配餐系统：
+
+- 整个应用是餐厅大楼
+- ActivityComponent 是二楼的餐厅区域
+- AppNavigator 是一名服务员
+- `@InstallIn(ActivityComponent::class)` 是"此服务员只在二楼工作"的安排
+- `@Inject lateinit var navigator: AppNavigator` 是客人举手叫服务员
+
+当客人（MainActivity）入座二楼时：
+1. 餐厅经理（Hilt）看到有新客人，检查"二楼服务安排"
+2. 发现需要分配一名服务员（AppNavigator）
+3. 注意到服务员需要知道自己负责的餐桌（需要 Activity 参数）
+4. 创建新服务员，告诉他"这是你负责的餐桌"
+5. 将服务员介绍给客人："这是您的专属服务员"
+6. 客人现在可以随时招呼服务员帮忙
+
+这种安排确保：
+- 每个餐桌有专属服务员（每个 Activity 有自己的 navigator）
+- 服务员知道自己服务的餐桌（navigator 持有 Activity 引用）
+- 服务员只在客人在餐厅时工作（随 Activity 生命周期创建和销毁）
+
+### 代码转换详解
+
+**原始代码**：
+```kotlin
+// NavigationModule.kt
+@InstallIn(ActivityComponent::class)
+@Module
+abstract class NavigationModule {
+    @Binds
+    abstract fun bindNavigator(impl: AppNavigatorImpl): AppNavigator
+}
+
+// MainActivity.kt
+@AndroidEntryPoint
+class MainActivity : AppCompatActivity() {
+    @Inject lateinit var navigator: AppNavigator
+    // ...
+}
+```
+
+**转换步骤 1**：生成 Hilt_MainActivity 基类
+```java
+// 简化的生成代码
+public abstract class Hilt_MainActivity extends AppCompatActivity
+        implements GeneratedComponentManager<ActivityComponent> {
+    
+    private volatile ActivityComponentManager componentManager;
+    
+    @Override
+    protected void onCreate(Bundle savedInstanceState) {
+        inject();
+        super.onCreate(savedInstanceState);
+    }
+    
+    private void inject() {
+        if (componentManager == null) {
+            componentManager = new ActivityComponentManager(this);
+        }
+        ((MainActivity_GeneratedInjector) generatedComponent())
+            .injectMainActivity((MainActivity) this);
+    }
+}
+```
+
+**转换步骤 2**：生成 MainActivity 注入器
+```java
+@EntryPoint
+@InstallIn(ActivityComponent.class)
+public interface MainActivity_GeneratedInjector {
+    void injectMainActivity(MainActivity instance);
+}
+```
+
+**转换步骤 3**：生成 MembersInjector 实现
+```java
+public final class MainActivity_MembersInjector {
+    private final Provider<AppNavigator> navigatorProvider;
+    
+    @Inject
+    public MainActivity_MembersInjector(Provider<AppNavigator> navigatorProvider) {
+        this.navigatorProvider = navigatorProvider;
+    }
+    
+    public static void injectNavigator(
+            MainActivity instance, AppNavigator navigator) {
+        instance.navigator = navigator;
+    }
+    
+    @Override
+    public void injectMembers(MainActivity instance) {
+        injectNavigator(instance, navigatorProvider.get());
+    }
+}
+```
+
+**转换步骤 4**：NavigationModule 转换
+```java
+// 记录模块和组件的关系
+@AggregatedDeps(
+    components = "dagger.hilt.android.components.ActivityComponent",
+    modules = "com.example.android.hilt.di.NavigationModule"
+)
+class HiltAggregatedDeps_NavigationModuleModuleDeps {}
+
+// 为抽象方法生成工厂类
+public final class NavigationModule_BindNavigatorFactory 
+        implements Factory<AppNavigator> {
+    
+    private final NavigationModule module;
+    private final Provider<AppNavigatorImpl> implProvider;
+    
+    public NavigationModule_BindNavigatorFactory(
+            NavigationModule module,
+            Provider<AppNavigatorImpl> implProvider) {
+        this.module = module;
+        this.implProvider = implProvider;
+    }
+    
+    @Override
+    public AppNavigator get() {
+        return module.bindNavigator(implProvider.get());
+    }
+}
+```
+
+### 五岁小孩理解版
+
+当你在玩电脑游戏时，每个游戏角色需要不同的工具。`@InstallIn(ActivityComponent::class)` 就像告诉游戏："这个导航工具只能给游戏中的主角色使用"。这样，当主角色出现时，游戏会自动交给他这个工具，主角色就可以用它来移动和探索游戏世界。如果主角色离开了，这个工具也会跟着收起来，不会浪费。
+
+### 高中生理解版
+
+`@InstallIn(ActivityComponent::class)` 是告诉 Hilt 系统将某个模块（提供依赖的集合）安装到与 Activity 生命周期相关联的组件中。在我们的例子里：
+
+1. NavigationModule 提供了 AppNavigator 的实现
+2. 这个模块被安装到 ActivityComponent 中
+3. 当 MainActivity 被创建时，Hilt 会：
+   - 创建 ActivityComponent 实例
+   - 查找需要的依赖（AppNavigator）
+   - 注入到标记了 @Inject 的字段中
+
+这样，每个 Activity 实例都有自己的 navigator，而这个 navigator 持有对该 Activity 的引用，能够执行导航操作。
+
+### 编程进阶理解版
+
+在底层实现中，`@InstallIn(ActivityComponent::class)` 通过以下步骤工作：
+
+1. 在编译期，Hilt 的注解处理器（`AggregatedDepsProcessor`）扫描所有标记了 `@Module` 和 `@InstallIn` 的类
+2. 对于每个模块，它创建一个 `@AggregatedDeps` 注解的类，记录模块与组件的关系
+3. 另一个处理器（`ComponentProcessor`）收集这些信息，并为每个组件生成实现
+4. 它还会为需要注入的类（如 MainActivity）生成基类和注入器
+5. 在运行时，Hilt 使用生成的代码创建组件实例，并执行依赖注入
+
+整个过程是完全在编译期确定的，这带来了强大的类型安全和运行时性能优势。
+
+### 承认实现的权衡
+
+#### 优势
+
+1. **类型安全**：编译时就能检测依赖问题
+2. **性能高效**：没有运行时反射，减少了性能开销
+3. **生命周期管理**：依赖与 Android 组件生命周期自然绑定
+4. **自动注入**：不需要手动编写工厂代码或构建依赖图
+
+#### 局限性
+
+1. **编译时间增加**：注解处理和代码生成会增加编译时间
+2. **学习成本**：理解组件层次结构和作用域需要时间
+3. **调试复杂性**：生成的代码可能难以调试
+4. **代码膨胀**：生成的类增加了应用大小
+
+#### 替代方案
+
+- **Koin**：更轻量，使用 DSL 而非注解，但失去编译时安全检查
+- **纯 Dagger**：更灵活但需要更多手动配置
+- **Service Locator**：更简单但缺乏编译时验证
+- **手动依赖注入**：完全控制但代码冗余
+
+### 结语
+
+`@InstallIn(ActivityComponent::class)` 和 `@Inject lateinit var navigator: AppNavigator` 的组合展示了 Hilt 如何通过编译时代码生成实现优雅的依赖注入。通过将导航器安装到 ActivityComponent 中，我们确保了：
+
+1. 每个 Activity 有自己的导航器实例
+2. 导航器能获取到当前 Activity 的引用
+3. 依赖随 Activity 生命周期管理
+4. 编译时就能验证依赖的有效性
+
+理解这个底层机制有助于我们更好地使用 Hilt，合理安排依赖的安装位置，确保应用架构清晰高效。
